@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #080A0F;
+  --card: #11151D;
+  --secondary: #171D27;
+  --text: #E5E7EB;
+  --text-secondary: #929BAA;
+  --positive: #00D995;
+  --negative: #FF496C;
+  --info: #35C9FF;
+  --analytics: #A78BFA;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
