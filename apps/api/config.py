@@ -4,8 +4,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_name: str = "Crypto Intelligence API"
     environment: str = "development"
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/crypto_intel"
-    redis_url: str = "redis://localhost:6379/0"
+    database_url: str
+    redis_url: str
     cors_origins: list[str] = ["http://localhost:3000"]
 
     class Config:
