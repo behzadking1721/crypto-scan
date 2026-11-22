@@ -13,5 +13,8 @@ def test_health_returns_200():
 def test_health_body():
     response = client.get("/health")
     body = response.json()
-    assert body["status"] == "ok"
-    assert "environment" in body
+    assert "status" in body
+    assert body["status"] in ("healthy", "degraded")
+    assert "dependencies" in body
+    assert "postgresql" in body["dependencies"]
+    assert "redis" in body["dependencies"]

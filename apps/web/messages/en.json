@@ -1,10 +1,32 @@
 {
-  "en": {
+  "Home": {
     "title": "Crypto Intelligence Platform",
     "subtitle": "Smart Money & Trader Intelligence System"
   },
-  "fa": {
-    "title": "پلتفرم هوش ارز دیجیتال",
-    "subtitle": "سیستم هوش تریدر و پول هوشمند"
+  "Health": {
+    "title": "Health Monitoring",
+    "subtitle": "System health and dependency status",
+    "overview": "System Overview",
+    "overallStatus": "Overall System Status",
+    "backendConnectivity": "Backend Connectivity",
+    "readinessStatus": "Readiness Status",
+    "dependencies": "Dependency Status",
+    "backendApi": "Backend API",
+    "postgresql": "PostgreSQL",
+    "redis": "Redis",
+    "healthy": "Healthy",
+    "degraded": "Degraded",
+    "unhealthy": "Unhealthy",
+    "unknown": "Unknown",
+    "checking": "Checking...",
+    "error": "Error",
+    "unableToConnect": "Unable to connect to backend",
+    "requestTimeout": "Request timed out",
+    "refresh": "Refresh",
+    "lastCheck": "Last check",
+    "lastAttempt": "Last attempt",
+    "notAvailable": "N/A",
+    "checkingData": "Checking...",
+    "monitoringControls": "Monitoring Controls"
   }
 }

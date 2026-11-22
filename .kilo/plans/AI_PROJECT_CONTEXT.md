@@ -43,4 +43,4 @@ Public APIs first; read-only keys; no trading/withdrawal; no private keys; no co
 English + Persian from Phase 1; RTL/LTR; Persian numerals; Shamsi dates.
 
 ## Current phase
-Phase 0 — Design & Audit (in progress).
+Phase 1 — Core Infra (in progress).

@@ -7,3 +7,4 @@ asyncpg>=0.29
 redis>=5.0
 celery>=5.3
 python-dotenv>=1.0
+alembic>=1.13

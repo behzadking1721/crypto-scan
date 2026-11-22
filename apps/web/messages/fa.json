@@ -1,10 +1,32 @@
 {
-  "en": {
-    "title": "Crypto Intelligence Platform",
-    "subtitle": "Smart Money & Trader Intelligence System"
-  },
-  "fa": {
+  "Home": {
     "title": "پلتفرم هوش ارز دیجیتال",
     "subtitle": "سیستم هوش تریدر و پول هوشمند"
+  },
+  "Health": {
+    "title": "پایش سلامت سیستم",
+    "subtitle": "وضعیت سلامت سیستم و وابستگی‌ها",
+    "overview": "نمایش کلی سیستم",
+    "overallStatus": "وضعیت کلی سیستم",
+    "backendConnectivity": "اتصال بک‌اند",
+    "readinessStatus": "وضعیت آمادگی",
+    "dependencies": "وضعیت وابستگی‌ها",
+    "backendApi": "بک‌اند API",
+    "postgresql": "PostgreSQL",
+    "redis": "ردیس",
+    "healthy": "سالم",
+    "degraded": "ضعیف",
+    "unhealthy": "نا‌سالم",
+    "unknown": "ناشناخته",
+    "checking": "در حال بررسی...",
+    "error": "خطا",
+    "unableToConnect": "امکان اتصال به بک‌اند وجود ندارد",
+    "requestTimeout": "مهلت درخواست به پایان رسید",
+    "refresh": "بازخوانی",
+    "lastCheck": "آخرین بررسی",
+    "lastAttempt": "آخرین تلاش",
+    "notAvailable": "در دسترس نیست",
+    "checkingData": "در حال بررسی...",
+    "monitoringControls": "کنترل‌های پایش"
   }
 }
