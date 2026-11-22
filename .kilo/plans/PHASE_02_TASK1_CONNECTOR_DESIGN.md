@@ -126,7 +126,7 @@ class ConnectContext:                      # SERIALIZABLE — no secret fields
 ```
 
 **Auth modes (connector declares `auth_mode`):**
-- `VAULT_SIGNING` (preferred, default where feasible): the connector calls `await provider.auth_headers(...)` or `await provider.sign(...)`. The Vault decrypts internally and returns only the **derived, non-secret artifact** (auth headers / signature). The raw secret **never enters connector memory**.
+- `VAULT_SIGNING` (preferred, default where feasible): the connector calls `await provider.auth_headers(...)` or `await provider.sign(...)`. The Vault decrypts internally and returns **Sensitive Derived Authentication Material (SDAM)** — e.g., Authorization/API-Key headers or a request signature (see Section 3.6). This is **not** "non-secret": it is sensitive and short-lived. Removing the raw secret from the connector does **not** make the derived output safe to log, persist, or reuse.
 - `LEASE` (fallback): the connector uses `async with provider.lease() as cred:` to obtain a decrypted `CredentialBundle` for the **minimal scope** (e.g., building one request), uses it immediately, and exits the scope. Used only for providers whose SDK requires direct secret access.
 
 **Example — preferred (vault_signing):**
@@ -135,7 +135,7 @@ class SomeConnector(BaseConnector):
     auth_mode = AuthMode.VAULT_SIGNING
     async def _get(self, path: str):
         headers = await self._credentials.auth_headers("GET", path, b"")
-        # headers contain derived auth data only; raw secret stayed inside the Vault
+        # SDAM: sensitive + short-lived — used for THIS request only, then dropped
         return await self._http.get(self._base_url + path, headers=headers)
 ```
 
@@ -144,10 +144,30 @@ class SomeConnector(BaseConnector):
 async def _signed_request(self, method, path, body):
     async with self._credentials.lease() as cred:      # scope-limited, in-memory
         signature = hmac(cred.api_secret, body)        # used immediately
+    # `signature` is SDAM (sensitive, replayable until expiry) — sent once, then dropped
     return await self._http.request(method, path, content=body, headers={"X-Signature": signature})
 ```
 
 **Why this fits Modular Monolith:** the provider is an injected interface; the connector depends on the abstraction, not on the Vault or DB. The Vault is the only holder of the master key; the connector only ever holds a provider reference (no secret). This respects module boundaries (ARCHITECTURE rules 4, 5, 8) and is testable (a fake provider is injected in unit tests).
+
+### 3.6 Derived Authentication Material — reclassification and handling (NEW)
+
+**Reclassification.** The outputs of `auth_headers()` and `sign()` — and any Bearer token, API-Key header, or request signature produced from credentials — are classified as **Sensitive Derived Authentication Material (SDAM)**: sensitive, temporary, and potentially **replayable/reusable until expiry or consumption**. They are **not** "non-secret", and removing the raw secret from the connector does **not** make these outputs safe.
+
+**Scope and lifetime.**
+- SDAM is used **only for the single request it was produced for**.
+- It is bound, as far as the provider allows, to that request's **method, path, and body** (and, where supported, a nonce/timestamp/expiry).
+- Unnecessary retention and reuse are prohibited; SDAM is dropped from the operational scope **immediately after the request is sent**.
+
+**Prohibited sinks (never log or transmit SDAM):** logs and audit logs; exception messages and stack traces; the database; Celery messages; API responses; the frontend; serialization or debug output.
+
+**Representation hygiene.** SDAM values (header dicts, signature strings, tokens) must **never** appear in `repr()`/`str()` of any object, in HTTP client debug logs, or in debugger output. Wrapper types for SDAM must redact `__repr__`/`__str__`; connectors must not pass SDAM to any logging or debug facility.
+
+**Honest security limitations.**
+- Removing the raw secret from the connector does **not** make the derived authentication output non-sensitive.
+- A generated signature/token may remain **sensitive and replayable until it expires or is consumed**; it must be handled with the same care as the secret for its (short) lifetime.
+- Memory erasure in Python is **not guaranteed** (immutable `str`, GC copies); zeroization is best-effort only.
+- Replay resistance depends on the provider's scheme (nonce/timestamp/expiry); where a provider does not support it, this is an accepted residual risk to be documented per connector.
 
 ## 4) Connector Lifecycle Diagram
 
@@ -202,12 +222,12 @@ Authoritative basis: `SECURITY_POLICY.md` (encrypted storage; no secrets in fron
 1. **ConnectorManager** loads the `DataSource` and resolves the **active `credential_version`** for the source (identifiers only — no secret).
 2. Manager calls `CredentialVault.provider_for(source_id, credential_version=active)`, returning a **`CredentialProvider`** bound to that source. The provider holds only `source_id` + key reference — **never plaintext**.
 3. Manager constructs `Connector(credentials=provider)` and calls `await connector.connect(ctx)` with a **secret-free, serializable** `ConnectContext`.
-4. When auth is needed the connector uses the provider: **`VAULT_SIGNING`** → `await provider.auth_headers(...)`/`await provider.sign(...)` (Vault decrypts internally; raw secret stays inside the Vault); or **`LEASE`** → `async with provider.lease() as cred:` for a scope-limited in-memory bundle, then dropped.
+4. When auth is needed the connector uses the provider: **`VAULT_SIGNING`** → `await provider.auth_headers(...)`/`await provider.sign(...)` producing **SDAM** (Vault decrypts internally; raw secret stays inside the Vault; the SDAM output is used for that one request and then dropped — Section 3.6); or **`LEASE`** → `async with provider.lease() as cred:` for a scope-limited in-memory bundle, then dropped.
 5. On `disconnect()` or task completion, connector and provider references are released; any lease is exited (best-effort zeroize).
 
 **Responsibility split:**
-- **CredentialVault:** sole master-key holder; decrypts; exposes `provider_for(...)`; returns derived artifacts or short-lived leases; never logs secrets.
-- **CredentialProvider (Vault-side adapter):** binds a source to its active credential; performs signing/header derivation or leases; persists nothing.
+- **CredentialVault:** sole master-key holder; decrypts; exposes `provider_for(...)`; returns **SDAM** or short-lived leases; never logs secrets or SDAM.
+- **CredentialProvider (Vault-side adapter):** binds a source to its active credential; performs signing/header derivation or leases; persists nothing; SDAM is returned for one request only.
 - **ConnectorManager:** resolves identifiers, builds and injects the provider, manages lifecycle; never sees plaintext.
 - **Connector:** consumes the provider via `auth_mode`; never receives secrets via `ConnectContext`; never persists/logs secrets.
 
@@ -217,8 +237,9 @@ Authoritative basis: `SECURITY_POLICY.md` (encrypted storage; no secrets in fron
 - `ConnectContext` is a frozen, serializable dataclass with **no secret-typed fields**; a unit test asserts `json.dumps(asdict(ctx))` succeeds, contains no secret keys, and no field is annotated as a secret type.
 - Secrets are **never** placed in: DB (ciphertext only), logs, exception messages, `ConnectContext`, Celery task args/messages, API responses, or the frontend. Celery messages carry only scalar identifiers (e.g., `source_id`); the provider is **reconstructed in-worker** from the Vault, never serialized.
 - `CredentialBundle.__repr__`/`__str__` are redacted; the logging redaction filter + credential-security tests assert no secret patterns anywhere (Section 10).
+- **SDAM (Section 3.6) is handled as sensitive and short-lived:** never logged (incl. audit logs), never placed in exceptions/stack traces, DB, Celery messages, API responses, frontend, serialization, or debug output; redacted in `__repr__`/`__str__`; used for one request only and dropped immediately after send.
 
-**Memory-erasure limitation (honest disclosure):** Python does **not** guarantee secure memory erasure. `str` is immutable and the interpreter/GC may leave transient copies; zeroizing a `bytearray` is **best-effort only**. Therefore this design (a) minimizes secret lifetime (lease scope / vault-side signing), (b) prefers `VAULT_SIGNING` so plaintext never enters the connector at all, and (c) performs best-effort zeroization on lease exit. **We do not claim guaranteed wiping of plaintext from process memory.** Preventing swap/core-dumps is an OS/deployment concern, out of scope here.
+**Memory-erasure limitation (honest disclosure):** Python does **not** guarantee secure memory erasure. `str` is immutable and the interpreter/GC may leave transient copies; zeroizing a `bytearray` is **best-effort only**. Therefore this design (a) minimizes secret lifetime (lease scope / vault-side signing), (b) prefers `VAULT_SIGNING` so plaintext never enters the connector at all, and (c) performs best-effort zeroization on lease exit. **We do not claim guaranteed wiping of plaintext from process memory.** SDAM (signatures/tokens) may remain sensitive and replayable until expiry/consumption and is handled as sensitive for that window; this design does not guarantee its erasure from memory either. Preventing swap/core-dumps is an OS/deployment concern, out of scope here.
 
 ### 5.4 Key rotation & KMS migration path (REVISED)
 - Dev: master key from env (`CONNECTOR_ENCRYPTION_KEY`). Prod (future): Secret Manager (AWS/GCP/Azure) or Vault.
@@ -327,7 +348,7 @@ Remaining test strategy (applies across tasks):
 - **Integration tests:** real source in staging behind an env flag (not default CI).
 - **Failure simulation:** timeout, 429/401, disconnect, partial data, retry exhaustion → task failure (expanded in Task 2).
 - **Retry tests:** verify bounded connector retries, no retry on auth/permanent, `Retry-After` honored, budget exhaustion raises `RateLimitError`, and no nested retry storm between connector and worker.
-- **Credential-security tests:** no plaintext in DB/log/API/serialized context/messages; API write-only + masked; decryption only via Vault.
+- **Credential-security tests:** no plaintext in DB/log/API/serialized context/messages; API write-only + masked; decryption only via Vault; **SDAM (`auth_headers()`/`sign()` outputs) never appears in logs, audit logs, exceptions/stack traces, DB, Celery messages, API responses, frontend, serialization, debug output, or `repr()`/`str()`**, and is scoped to a single request.
 - **Idempotency expectations:** duplicate `idempotency_key` → single normalized event (finalized in Task 5; Task 1 guarantees the key exists on `RawRecord`).
 
 ## 11) First Provider Recommendation & Phase 2 Exit Timing (Correction 5)
