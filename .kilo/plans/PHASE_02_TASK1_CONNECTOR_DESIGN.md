@@ -39,12 +39,18 @@ Compatibility note: current repo uses flat imports, `apps/api` as rootdir, `alem
 
 Recommended: **ABC** (`BaseConnector`) for lifecycle + **capability Protocols** (`typing.Protocol`, `runtime_checkable`) so REST-only providers are not forced to implement streaming.
 
-### 3.1 Core (ABC, required)
+### 3.1 Core (ABC, required) — REVISED (secure credential injection)
+
 ```python
 class BaseConnector(ABC):
     capabilities: Capabilities          # dataclass: rest, historical, latest, stream, subscribe
+    auth_mode: AuthMode                 # enum: VAULT_SIGNING (preferred) | LEASE (raw in-memory)
+
+    def __init__(self, credentials: CredentialProvider) -> None:
+        self._credentials = credentials  # injected by ConnectorManager; NOT a secret itself
+
     @abstractmethod
-    async def connect(self, ctx: ConnectContext) -> None: ...
+    async def connect(self, ctx: ConnectContext) -> None: ...   # ctx is secret-free / serializable
     @abstractmethod
     async def disconnect(self) -> None: ...
     @abstractmethod
@@ -52,6 +58,8 @@ class BaseConnector(ABC):
     @abstractmethod
     async def get_status(self) -> ConnectorStatus: ...
 ```
+
+`ConnectContext` carries only serializable, non-secret config (source_id, base_url, environment, timeouts). Secrets are **never** passed to `connect()` or stored on `ConnectContext`; the connector obtains credentials **out-of-band** through the injected `CredentialProvider` (Section 3.5).
 
 ### 3.2 REST capabilities (Protocol)
 ```python
@@ -86,6 +94,60 @@ Streaming contract (REVISED):
 - Pagination: cursor/offset, transparent to consumer (async iterator).
 - Time ranges: `datetime[UTC]`, `start <= end`.
 - Completeness: enum complete/partial/unknown + expected/received (feeds Task 4 quality).
+
+### 3.5 Secure credential injection contract (NEW — resolves the `connect()` / `ConnectContext` contradiction)
+
+**Problem:** `connect(ctx)` must not carry secrets, yet the connector still needs credentials. **Resolution:** the connector receives a `CredentialProvider` by **constructor injection** (composition); credentials are obtained **out-of-band** from the `CredentialVault` through that provider — never through `ConnectContext`, Celery messages, or any serializable structure.
+
+```python
+@runtime_checkable
+class CredentialProvider(Protocol):
+    # Preferred: Vault performs the secret-using operation; raw secret never enters the connector.
+    async def auth_headers(self, method: str, path: str, body: bytes) -> dict[str, str]: ...
+    async def sign(self, payload: bytes) -> bytes: ...
+    # Fallback (auth_mode = LEASE): short-lived, in-memory access for providers that must use the secret directly.
+    def lease(self) -> "CredentialLease": ...
+
+class CredentialLease:                     # async context manager; in-memory only
+    async def __aenter__(self) -> "CredentialBundle": ...
+    async def __aexit__(self, *exc) -> None: ...   # best-effort zeroize + drop reference
+
+class CredentialBundle:                    # NOT serializable; __repr__/__str__ redacted
+    # holds api_key / api_secret / passphrase in memory for the lease scope only
+    ...
+
+@dataclass(frozen=True)
+class ConnectContext:                      # SERIALIZABLE — no secret fields
+    source_id: UUID
+    base_url: str
+    environment: str
+    timeouts: Timeouts
+    # ... other non-secret config
+```
+
+**Auth modes (connector declares `auth_mode`):**
+- `VAULT_SIGNING` (preferred, default where feasible): the connector calls `await provider.auth_headers(...)` or `await provider.sign(...)`. The Vault decrypts internally and returns only the **derived, non-secret artifact** (auth headers / signature). The raw secret **never enters connector memory**.
+- `LEASE` (fallback): the connector uses `async with provider.lease() as cred:` to obtain a decrypted `CredentialBundle` for the **minimal scope** (e.g., building one request), uses it immediately, and exits the scope. Used only for providers whose SDK requires direct secret access.
+
+**Example — preferred (vault_signing):**
+```python
+class SomeConnector(BaseConnector):
+    auth_mode = AuthMode.VAULT_SIGNING
+    async def _get(self, path: str):
+        headers = await self._credentials.auth_headers("GET", path, b"")
+        # headers contain derived auth data only; raw secret stayed inside the Vault
+        return await self._http.get(self._base_url + path, headers=headers)
+```
+
+**Example — fallback (lease):**
+```python
+async def _signed_request(self, method, path, body):
+    async with self._credentials.lease() as cred:      # scope-limited, in-memory
+        signature = hmac(cred.api_secret, body)        # used immediately
+    return await self._http.request(method, path, content=body, headers={"X-Signature": signature})
+```
+
+**Why this fits Modular Monolith:** the provider is an injected interface; the connector depends on the abstraction, not on the Vault or DB. The Vault is the only holder of the master key; the connector only ever holds a provider reference (no secret). This respects module boundaries (ARCHITECTURE rules 4, 5, 8) and is testable (a fake provider is injected in unit tests).
 
 ## 4) Connector Lifecycle Diagram
 
@@ -135,6 +197,29 @@ Authoritative basis: `SECURITY_POLICY.md` (encrypted storage; no secrets in fron
 - **Redaction filter** applied to all logs/exceptions; secrets never logged (aligns with `logger.py` `SENSITIVE_HEADERS`).
 - **Security tests** must verify the absence of secret leakage across DB, logs, API responses, serialized `ConnectContext`, and message payloads (see Section 10).
 
+### 5.3.1 Credential flow (Vault → Connector) and responsibility split
+
+1. **ConnectorManager** loads the `DataSource` and resolves the **active `credential_version`** for the source (identifiers only — no secret).
+2. Manager calls `CredentialVault.provider_for(source_id, credential_version=active)`, returning a **`CredentialProvider`** bound to that source. The provider holds only `source_id` + key reference — **never plaintext**.
+3. Manager constructs `Connector(credentials=provider)` and calls `await connector.connect(ctx)` with a **secret-free, serializable** `ConnectContext`.
+4. When auth is needed the connector uses the provider: **`VAULT_SIGNING`** → `await provider.auth_headers(...)`/`await provider.sign(...)` (Vault decrypts internally; raw secret stays inside the Vault); or **`LEASE`** → `async with provider.lease() as cred:` for a scope-limited in-memory bundle, then dropped.
+5. On `disconnect()` or task completion, connector and provider references are released; any lease is exited (best-effort zeroize).
+
+**Responsibility split:**
+- **CredentialVault:** sole master-key holder; decrypts; exposes `provider_for(...)`; returns derived artifacts or short-lived leases; never logs secrets.
+- **CredentialProvider (Vault-side adapter):** binds a source to its active credential; performs signing/header derivation or leases; persists nothing.
+- **ConnectorManager:** resolves identifiers, builds and injects the provider, manages lifecycle; never sees plaintext.
+- **Connector:** consumes the provider via `auth_mode`; never receives secrets via `ConnectContext`; never persists/logs secrets.
+
+### 5.3.2 Guarantees and honest limitations
+
+**Guarantees (enforced by design + tests):**
+- `ConnectContext` is a frozen, serializable dataclass with **no secret-typed fields**; a unit test asserts `json.dumps(asdict(ctx))` succeeds, contains no secret keys, and no field is annotated as a secret type.
+- Secrets are **never** placed in: DB (ciphertext only), logs, exception messages, `ConnectContext`, Celery task args/messages, API responses, or the frontend. Celery messages carry only scalar identifiers (e.g., `source_id`); the provider is **reconstructed in-worker** from the Vault, never serialized.
+- `CredentialBundle.__repr__`/`__str__` are redacted; the logging redaction filter + credential-security tests assert no secret patterns anywhere (Section 10).
+
+**Memory-erasure limitation (honest disclosure):** Python does **not** guarantee secure memory erasure. `str` is immutable and the interpreter/GC may leave transient copies; zeroizing a `bytearray` is **best-effort only**. Therefore this design (a) minimizes secret lifetime (lease scope / vault-side signing), (b) prefers `VAULT_SIGNING` so plaintext never enters the connector at all, and (c) performs best-effort zeroization on lease exit. **We do not claim guaranteed wiping of plaintext from process memory.** Preventing swap/core-dumps is an OS/deployment concern, out of scope here.
+
 ### 5.4 Key rotation & KMS migration path (REVISED)
 - Dev: master key from env (`CONNECTOR_ENCRYPTION_KEY`). Prod (future): Secret Manager (AWS/GCP/Azure) or Vault.
 - Rotation: add new key as new `encryption_key_version`; re-encrypt active sets to new version; decrypt old with old version during transition; then retire old key.
@@ -168,9 +253,9 @@ Integrates with existing `Base` and `AuditLog` (`models.py`, `DeclarativeBase`);
 
 | Component | Responsibility | Integration point (future) |
 |---|---|---|
-| Connector | Provider I/O only (connect/fetch/stream/health) | — |
-| ConnectorRegistry/Manager | Lifecycle, scheduling, credential injection, health, capability checks | called by Celery/API |
-| CredentialVault | Decrypt/rotate keys, redaction, sole secret access | only ConnectorManager |
+| Connector | Provider I/O only (connect/fetch/stream/health); consumes an injected `CredentialProvider` via `auth_mode`; never holds secrets beyond a lease scope | — |
+| ConnectorRegistry/Manager | Lifecycle, scheduling, resolves active credential, builds + injects `CredentialProvider`, health, capability checks; never sees plaintext | called by Celery/API |
+| CredentialVault | Sole master-key holder; decrypts; exposes `provider_for(...)` (signing/lease); redaction; no secret logging | only ConnectorManager |
 | FastAPI | health/status, on-demand fetch; no synchronous ingestion loop | `/health`,`/ready`, future `/sources` |
 | Celery (Workers) | Ingestion, task-level retry, DLQ, provider rate-limit | Task 5/6/7 |
 | Redis | Celery broker + provider rate-limit counters + cache | Task 7 |
@@ -322,6 +407,7 @@ The five corrections in this revision (Sections 5.3, 8.1, 10, 11, 18) are **agre
 | D12 | Ingestion runtime | Celery workers; API read-only health/on-demand | Worker placement + import path | Pending Approval |
 | D13 | Future deps | httpx, websockets, cryptography, (tenacity), respx | requirements changes (later) | Pending Approval |
 | D14 | DB schema | Four tables per Section 6 | New models + migration (later) | Pending Approval |
+| D15 | Credential injection contract | Constructor-injected `CredentialProvider`; secrets out-of-band via Vault (preferred `VAULT_SIGNING`, fallback `LEASE`); `ConnectContext` secret-free | Resolves the `connect()`/security contradiction; per-connector `auth_mode`; memory-erasure limitation documented | Pending Approval |
 
 ## 17) Open Questions
 
