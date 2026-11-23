@@ -1,6 +1,6 @@
-# Phase 2 — Task 1: Connector Framework — Design Report (Revised — pending approval)
+# Phase 2 — Task 1: Connector Framework — Design Report (Revised — decisions D1–D15, D8a, D8b approved 2026-11-23)
 
-> Design-only / documentation. No application code, packages, directories, dependencies, DB schema/migrations, project settings, or Git operations were changed. This document revises the earlier Connector Framework design and adds a Decision Log and Open Questions. **Status: proposals only — nothing in this document is an approved architectural decision unless explicitly marked "Approved" in the Decision Log (Section 16).**
+> Design-only / documentation. No application code, packages, directories, dependencies, DB schema/migrations, project settings, or Git operations were changed. This document revises the earlier Connector Framework design and adds a Decision Log and Open Questions. **Status: architectural decisions D1–D15, D8a, and D8b are marked "Approved (2026-11-23)" in the Decision Log (Section 16); remaining open items are tracked in Open Questions (Section 17, Q1 and Q3–Q6).**
 
 ## 1) Executive Summary
 
@@ -16,7 +16,7 @@ Recommended: top-level `connectors/` package (shared by API and future workers):
 
 ```
 connectors/
-  pyproject.toml            # packaging (REQUIRES APPROVAL)
+  pyproject.toml            # packaging (approved per D1/D2)
   __init__.py
   base.py                   # BaseConnector (ABC) + capability Protocols
   types.py                  # shared dataclasses / pydantic models
@@ -33,7 +33,7 @@ apps/api/                   # consumer only: health/status/on-demand fetch
 services/ (future)          # Celery workers — consumers of connectors
 ```
 
-Compatibility note: current repo uses flat imports, `apps/api` as rootdir, `alembic.ini` `prepend_sys_path = .`, `pytest.ini` `testpaths = tests`. A top-level package requires either `pyproject.toml` + editable install (recommended) or adding repo root to `sys.path`/`pythonpath`. This is a packaging decision requiring approval.
+Compatibility note: current repo uses flat imports, `apps/api` as rootdir, `alembic.ini` `prepend_sys_path = .`, `pytest.ini` `testpaths = tests`. A top-level package requires either `pyproject.toml` + editable install (recommended) or adding repo root to `sys.path`/`pythonpath`. This packaging decision is **resolved by D1/D2 (approved 2026-11-23)**: `pyproject.toml` + editable install, no `sys.path` hacks.
 
 ## 3) Connector Interface Specification
 
@@ -308,10 +308,10 @@ Retry is owned at two distinct layers and must never nest into an uncontrolled s
 - **Connector (per-request HTTP retry) — designed and tested in Task 1:**
   - Applies only to **idempotent** requests and transient failures (`TransientConnectorError`, network errors, 5xx, and 429).
   - **HTTP 429:** the connector reads `Retry-After` when present (delta-seconds or HTTP-date) and waits at least that long before the next attempt. When `Retry-After` is absent, it falls back to exponential backoff + jitter.
-  - **Bounded budget:** retry stops after a configurable `max_attempts` and a configurable `max_total_wait` (wall-clock budget). Proposed defaults (NOT final — require approval): `max_attempts = 3`, `max_total_wait = 30s`, base backoff 0.5s, cap 8s, jitter ±20%.
+  - **Bounded budget:** retry stops after a configurable `max_attempts` and a configurable `max_total_wait` (wall-clock budget). **Approved defaults (D8a, 2026-11-23):** `max_attempts = 3`, `max_total_wait = 30s`, base backoff 0.5s, cap 8s, jitter ±20%.
   - **Budget exhausted:** if the retry budget is spent (attempts or max wait), or `Retry-After` exceeds `max_total_wait`, the connector stops retrying and raises `RateLimitError(retry_after=...)` to the caller. It never sleeps beyond the budget.
   - **No retry** on `AuthError` or `PermanentConnectorError`.
-  - Suggested configurable keys (per connector, pending approval): `connector.retry.max_attempts`, `connector.retry.max_total_wait_seconds`, `connector.retry.base_backoff_seconds`, `connector.retry.backoff_cap_seconds`, `connector.retry.jitter_ratio`.
+  - Configurable keys (per connector, approved per D8a): `connector.retry.max_attempts`, `connector.retry.max_total_wait_seconds`, `connector.retry.base_backoff_seconds`, `connector.retry.backoff_cap_seconds`, `connector.retry.jitter_ratio`.
 
 - **Worker/Celery (task-level retry) — implemented and tested in Task 7 (NOT Task 1):**
   - Owns run-level retry and recovery of failed ingestion tasks (Celery retry/backoff + Dead Letter Queue).
@@ -320,13 +320,20 @@ Retry is owned at two distinct layers and must never nest into an uncontrolled s
 
 - **No nested uncontrolled retries:** the connector's inner request-retry and the worker's outer task-retry are bounded independently. A connector that has exhausted its request-retry budget surfaces `RateLimitError`/failure to the worker, which applies a single task-level retry — never another inner loop.
 
-- **Timeout:** separate `connect_timeout`, `read_timeout`, `ws_timeout`, per connector (configurable, pending approval).
+- **Timeout:** separate `connect_timeout`, `read_timeout`, `ws_timeout`, per connector (configurable; architecture approved per D8b, numeric values determined and locked during implementation).
 
 ### 8.2 Provider rate-limit vs user API rate-limit (REVISED)
 - Two independent limiters (per `MODULE_RATE_LIMITING.md`: internal API limits + external provider limit management):
   - **Provider rate-limit** (external): per-source counters in Redis (`ratelimit:provider:<source>:<window>`), budget-aware, governs outbound calls. Lives with connectors/workers.
   - **User API rate-limit** (internal): existing `rate_limit.py` per-user/IP/endpoint middleware. Governs inbound API clients.
 - They are separate concerns and must not share counters or configuration.
+- **HTTP 429 boundary (D8a vs D9, clarified):**
+  - The **Central Provider Rate Limiter (D9)** applies provider limits and request budget **before a request is sent** (pre-request / proactive throttling), so most requests never reach the provider in violation of budget.
+  - **Connector-level retry (D8a)** handles only those **HTTP 429 responses that are still received** despite central control (reactive, per-request).
+  - `Retry-After` must be honored (delta-seconds or HTTP-date).
+  - **No double waiting, no duplicate retry, and no uncontrolled request amplification:** a 429 handled by connector retry is not re-scheduled into a second inner loop; the central limiter does not replay an already-retried request.
+  - The **combined retry budget (D8b)** across Connector-level and Celery Worker retries is preserved and bounds total attempts.
+  - No numeric value of D8a is changed by this clarification.
 
 ### 8.3 Error mapping
 Map HTTP/WS statuses to the error hierarchy; log structured fields only (Section 9); never log raw provider payloads.
@@ -365,27 +372,27 @@ Remaining test strategy (applies across tasks):
 
 **Constraint (authoritative):** `PHASE_02_DATA_INFRA.md` line 11 lists the Phase 2 **exit** as ">=1 source connected; data normalized; dupes detected; quality reported; recovery works." Because "≥1 source connected" is a **Phase 2 exit criterion**, it must be satisfied **within Phase 2** and cannot be silently deferred to Phase 3 without an explicit, approved plan change.
 
-**Recommendation (pending approval):**
-- **Hyperliquid** is the first real provider (official priority #1; public data without keys; REST + WebSocket; generous limits; high product relevance).
+**Status (D11 approved 2026-11-23 for Hyperliquid; scheduling remains Q1):**
+- **Hyperliquid** is the first real provider (approved per D11; official priority #1; public data without keys; REST + WebSocket; generous limits; high product relevance).
 - It should be scheduled **inside Phase 2**, with its **integration test in staging** (real source), not a unit test (`TESTING_STRATEGY.md` line 22 forbids real APIs in unit tests).
 - **Task 1 remains framework + contract + MockConnector only**; real provider integration is a **separate task**.
-- **Proposed new task (proposal only — the official `PHASE_02_DATA_INFRA.md` is NOT edited here):** add a Phase 2 task, tentatively "First Real Connector (Hyperliquid) + staging integration," to be numbered/placed by the user in the official phase plan if approved.
-- Until the user decides, this remains **Open Question Q1** (reframed: which Phase 2 task delivers the first real provider, given it cannot be deferred out of Phase 2).
+- **Proposed new task (proposal only — the official `PHASE_02_DATA_INFRA.md` is NOT edited here):** add a Phase 2 task, tentatively "First Real Connector (Hyperliquid) + staging integration," to be numbered/placed by the user in the official phase plan. Which task and when remain **Open Question Q1** (Hyperliquid selection itself is approved per D11).
 
 ## 12) Dependencies to Install Later (not installed now)
 
 | Dependency | Justification | Stage |
 |---|---|---|
-| `httpx` | async HTTP client for REST connectors | Task 1 (after approval) |
-| `websockets` | WS client for streaming | Task 1/providers |
-| `cryptography` (Fernet) | credential encryption at rest | Task 1 |
-| `tenacity` (or custom) | bounded backoff/jitter | Task 1/6 |
-| `respx`/`pytest-httpx` | HTTP mocking in tests | Task 1 |
+| `httpx` | async HTTP client for REST connectors — **Required** (D13) | Task 1 (after approval) |
+| `websockets` | WS client for streaming — **Required** (D13) | Task 1/providers |
+| `cryptography` (Fernet) | credential encryption at rest — **Required** (D13) | Task 1 |
+| `respx` | HTTP mocking in tests — **Selected testing dependency** (D13) | Task 1 |
+| `pytest-httpx` | **Not required** unless a future justified need arises (D13) | — |
+| `tenacity` | **Optional**; introduce only if a justified technical need arises — retry remains centrally controlled per D8/D8a (D13) | Task 1/6 |
 | `celery` | queue/worker (already in requirements) | Task 7 |
 
 ## 13) Risks & Unresolved Decisions
 
-- Connector placement/packaging (top-level package + `pyproject`) — needs approval.
+- Connector placement/packaging (top-level package + `pyproject`) — **resolved by D1/D2 (approved 2026-11-23)**.
 - Master-key storage in production (Secret Manager vs Vault).
 - `raw_events` schema and raw/processed split (DATABASE_DESIGN open; Tasks 3/5).
 - TimescaleDB for time-series (later Phase 2 decision).
@@ -419,38 +426,40 @@ Phase 2 exit (`>=1 source connected; normalized; dupes; quality; recovery`) span
 
 ## 16) Decision Log
 
-The five corrections in this revision (Sections 5.3, 8.1, 10, 11, 18) are **agreed design direction**. That agreement does **NOT** auto-approve the architecture decisions below. **No decision is marked "Approved" unless the user explicitly says so.** Status values: `Proposed` (idea recorded, not yet reviewed), `Pending Approval` (concrete proposal awaiting user sign-off), `Approved` (explicit user approval on record — none currently).
+The five corrections in this revision (Sections 5.3, 8.1, 10, 11, 18) are **agreed design direction**. That agreement does **NOT** auto-approve the architecture decisions below. **No decision is marked "Approved" unless the user explicitly says so.** Status values: `Proposed` (idea recorded, not yet reviewed), `Pending Approval` (concrete proposal awaiting user sign-off), `Approved` (explicit user approval on record — D1, D2, D3, D4, D5, D6, D7, D8, D8a, D8b, D9, D10, D11, D12, D13, D14 and D15 approved 2026-11-23).
 
 | ID | Decision (description) | Current proposal | Technical consequences | Status |
 |---|---|---|---|---|
-| D1 | Connector placement | Top-level `connectors/` package | Shared by API + future workers; needs import/packaging setup | Pending Approval |
-| D2 | Packaging/import | `pyproject.toml` + editable install (alt: `sys.path`/`pythonpath`) | Affects alembic `prepend_sys_path`, pytest rootdir, CI | Pending Approval |
-| D3 | Contract pattern | ABC (lifecycle) + capability Protocols | REST-only providers exempt from streaming | Proposed |
-| D4 | Streaming contract | `stream() -> AsyncIterator[StreamMessage]`; REST-only exempt | Defines consumer receive model + backpressure | Proposed |
-| D5 | Credential versioning | `credential_version` ≠ `encryption_key_version`; N sets/source; one encrypted payload | Schema + rotation semantics | Proposed |
-| D6 | Credential access | Decrypt only via `CredentialVault`; write-only + masked API; no raw secret anywhere | Security boundary + tests | Proposed |
-| D7 | Key rotation / KMS | Versioned keys now; `KeyProvider` interface → KMS later | Future KMS migration without call-site change | Proposed |
-| D8 | Retry ownership | Connector bounded request-retry (idempotent, honors `Retry-After`, no auth retry); Worker task-retry; no nested storms | Retry config keys; Task 1 vs Task 7 split | Proposed |
-| D8a | Retry config values | `max_attempts=3`, `max_total_wait=30s`, base 0.5s, cap 8s, jitter ±20% | Tunable per connector; not final | Proposed |
-| D9 | Rate-limit split | Provider (outbound) vs user API (inbound) independent limiters | Separate Redis counters/config | Proposed |
-| D10 | Logging security | No headers/raw body/secrets; safe structured fields; filtered `message` | Log schema + redaction filter | Proposed |
-| D11 | First provider | Hyperliquid, within Phase 2, staging integration (separate task) | Adds a Phase 2 task (proposal only) | Pending Approval |
-| D12 | Ingestion runtime | Celery workers; API read-only health/on-demand | Worker placement + import path | Pending Approval |
-| D13 | Future deps | httpx, websockets, cryptography, (tenacity), respx | requirements changes (later) | Pending Approval |
-| D14 | DB schema | Four tables per Section 6 | New models + migration (later) | Pending Approval |
-| D15 | Credential injection contract | Constructor-injected `CredentialProvider`; secrets out-of-band via Vault (preferred `VAULT_SIGNING`, fallback `LEASE`); `ConnectContext` secret-free | Resolves the `connect()`/security contradiction; per-connector `auth_mode`; memory-erasure limitation documented | Pending Approval |
+| D1 | Connector placement | **Approved (2026-11-23):** Connector lives in an independent `connectors/` package at the project root. | Shared by API + future workers; needs packaging setup (see D2) | Approved (2026-11-23) |
+| D2 | Packaging/import | **Approved (2026-11-23):** `pyproject.toml` + editable installation; **no `sys.path` hacks.** | Affects alembic `prepend_sys_path`, pytest rootdir, CI | Approved (2026-11-23) |
+| D3 | Contract pattern | **Approved (2026-11-23):** ABC for the shared Connector lifecycle (`connect`, `disconnect`, `health_check`, `get_status`) + Protocols for independent optional capabilities; all connectors honor the base contract. | REST-only providers exempt from streaming | Approved (2026-11-23) |
+| D4 | Streaming contract | **Approved (2026-11-23):** Streaming is an independent, optional capability; REST-only connectors are not forced to implement it; the contract stays async and `AsyncIterator`-based; connection/disconnection, reconnect, and backpressure are defined in the streaming contract. | Defines consumer receive model + backpressure | Approved (2026-11-23) |
+| D5 | Credential versioning | **Approved (2026-11-23):** `credential_version` and `encryption_key_version` are independent; each credential set has its own id/version; a data source may hold multiple sets; on rotation the new version is validated first, then the previous is deactivated; stored credentials are ciphertext-only; changing an API key/secret must not require changing the encryption key (and vice-versa). | Schema + rotation semantics | Approved (2026-11-23) |
+| D6 | Credential access | **Approved (2026-11-23):** `CredentialVault` is the only component that decrypts credentials and holds/uses the master key; `ConnectorManager` requests credentials from the Vault and injects a `CredentialProvider` (no direct master-key access); connectors access auth only via `CredentialProvider`; Celery workers rebuild the provider via the Manager (no master-key access); FastAPI exposes only create/rotate/deactivate with masked output and no plaintext-retrieval API; the frontend never accesses secrets/master key; access is scoped to `source_id` + permissions; create/rotate/deactivate are audited (no secret/SDAM); no secret or SDAM is exposed in logs, exceptions, plaintext DB, Celery messages, or API responses. | Security boundary + tests | Approved (2026-11-23) |
+| D7 | Key rotation / KMS | **Approved (2026-11-23):** Dev uses `CONNECTOR_ENCRYPTION_KEY` from an env var (never in Git/source/committed files; local `.env` only if gitignored); Prod uses a KMS/Secret Manager with key-version management, master key never stored in the DB and accessible only to `CredentialVault`; each encryption key has an independent id/version; data encrypted under older key versions stays decryptable; re-encryption to a new key is controlled and verifiable; the old key is not removed until migration + validation complete; safe rollback is supported; key rotation must not change provider credentials. | Future KMS migration without call-site change | Approved (2026-11-23) |
+| D8 | Retry ownership | **Approved (2026-11-23):** Connector owns bounded per-HTTP-request retry (honors `Retry-After` on 429); Celery Worker owns task-level retry (delay/retry/task-failure); Event Processor owns event-level idempotency, recovery, and event DLQ; nested/unlimited/duplicate cross-layer retries are forbidden; transient + rate-limit errors may be retried, auth/permanent errors are not; side-effecting operations run idempotently; DLQ is split — Task-level DLQ (Celery Worker) and Event-level DLQ (Event Processor) are independent responsibilities. | Retry config keys; Task 1 vs Task 7 split | Approved (2026-11-23) |
+| D8a | Retry config values (Connector HTTP) | **Approved (2026-11-23):** `max_attempts=3`, `max_total_wait_seconds=30`, `base_backoff_seconds=0.5`, `backoff_cap_seconds=8`, `jitter_ratio=0.20` (±20%); strategy = exponential backoff + jitter; overridable per connector; on HTTP 429 honor `Retry-After` (delta-seconds or HTTP-date); if `Retry-After` exceeds the remaining retry budget, stop and raise `RateLimitError(retry_after=...)`; never wait beyond the configured time budget; these values apply **only** to Connector HTTP-request retry (NOT Celery task-level retry); boundaries and no-nested-retry per D8 remain in force. | Approved defaults; overridable per connector; Celery task-level retry governed separately (Task 7) | Approved (2026-11-23) |
+| D8b | Retry profiles, combined retry budget & connection timeouts | **Approved (2026-11-23):** The Connector Framework must support separate configurable retry profiles for Historical and Realtime operations. A combined retry budget across Connector-level HTTP retries and Celery Worker task retries must prevent uncontrolled request amplification, while preserving the retry ownership boundaries defined in D8 and the HTTP request retry defaults approved in D8a. The framework must define separate `connect_timeout`, `read_timeout`, and `ws_timeout` settings. WebSocket connections must support reconnection using exponential backoff with jitter and a configurable heartbeat interval. Retry and timeout profiles must be configurable per Provider. This decision establishes architectural requirements only; no new numeric values are approved. Numeric defaults and final configuration values will be determined, validated, and locked during implementation without overriding D8 or D8a. | Affects retry/timeout config schema; needs Task 7 coordination | Approved (2026-11-23) |
+| D9 | Provider rate limiting | **Approved (2026-11-23):** Provider rate limiting for all outbound requests to external data sources implemented via Redis; limits managed per `data_source` per provider policy/budget; counters and request budget shared/distribution across all workers (no independent per-worker limits); provider time windows and request budgets honored; HTTP 429 + `Retry-After` are honored by the central provider limiter so subsequent requests are also throttled; fully independent from User API rate limiting (Provider = outbound to providers; User API = inbound per User/IP/Endpoint via existing `rate_limit.py` middleware); counters/config of the two systems must not be shared; on Redis unavailability Provider rate limiting is fail-safe — the worker must not bypass provider limits or send uncounted; operations are safely halted/deferred. Redis key retained: `ratelimit:provider:<source>:<window>`. | Separate Redis counters/config; fail-safe on Redis outage | Approved (2026-11-23) |
+| D10 | Logging security | **Approved (2026-11-23):** Logging Security must prevent credentials, API keys, secrets, tokens, sensitive HTTP headers, raw request/response bodies, SDAM, and potentially sensitive raw Provider error messages from being exposed in logs or downstream systems. Only explicitly allowlisted safe structured fields may be logged, including `error_code`, `exception_type`, `request_id`, `http_status`, `latency_ms`, `event`, `level`, and `data_source_id`. Apply redaction filters to log records and exception formatting, including authorization, api-key, x-api-key, cookie, set-cookie, proxy-authorization, token, and secret patterns. `connector_logs.message` must use safe controlled templates; raw Provider exception text such as `str(exc)` must never be logged verbatim. No sensitive information or SDAM may appear in audit logs, stack traces, databases, Celery messages, API/frontend output, telemetry, analytics, or debug output. Add tests verifying that secrets and SDAM do not leak into logs, database records, or API responses. | Log schema + redaction filter + leak tests | Approved (2026-11-23) |
+| D11 | First provider | **Approved (2026-11-23):** Hyperliquid is selected as the first real Data Provider for Phase 2. Its integration and validation begin in Staging. Public market data uses public API access without requiring API credentials. The integration validates both REST and WebSocket capabilities where applicable — real connectivity, data retrieval, rate limiting, error handling, and connection recovery. The Connector Framework remains provider-agnostic; selecting Hyperliquid does not restrict future provider integrations. | Adds a Phase 2 task (proposal only) | Approved (2026-11-23) |
+| D12 | Ingestion runtime | **Approved (2026-11-23):** Celery Workers using the existing Redis infrastructure execute Data Ingestion operations independently of FastAPI request handling. Workers obtain/initialize Connectors through ConnectorManager and Registry. Celery task messages may contain only identifiers and non-sensitive configuration; credentials, secrets, and SDAM must never be included. Task-level retry and failure handling follow D8 and D8a; Event-level recovery and DLQ remain the responsibility of the Event Processor. Provider Rate Limiting remains centralized and distributed through Redis per D9, without independent per-worker counters. FastAPI handles user requests and status exposure; Workers execute ingestion operations. | Worker placement + import path | Approved (2026-11-23) |
+| D13 | Future deps | **Approved (2026-11-23):** The Connector Framework will use `httpx` for asynchronous REST communication, `websockets` for asynchronous WebSocket communication, and `cryptography` for Fernet-based credential encryption per D7. `respx` is selected as the HTTP mocking/testing library. `pytest-httpx` is not required unless a future justified need arises. `tenacity` is optional and must not be introduced unless necessary; retry behavior remains centrally controlled per D8 and D8a, without duplicated or uncontrolled retry layers. Dependency versions must be selected for compatibility with the project's Python/runtime environment and locked during implementation. | requirements changes (later) | Approved (2026-11-23) |
+| D14 | DB schema | **Approved (2026-11-23):** The initial Connector Framework database design will use four tables: `data_sources` for provider/source configuration; `data_source_status` for current operational status and health metrics; `connector_logs` for safe structured operational events; and `api_credentials` for encrypted, versioned Credential Sets. Relationships must use appropriate foreign keys and integrity constraints, with indexes for frequently queried fields. Credential Set versioning and encryption key versioning remain independent, and each data source may have multiple Credential Sets. Only CredentialVault may decrypt credentials. API operations are limited to creating, rotating, and deactivating credentials, with masked/write-only output. `connector_logs` must comply with D10 and must not contain secrets, SDAM, raw Provider error messages, or sensitive information. Decisions concerning `raw_events`, TimescaleDB, and historical status storage remain outside D14 and must be addressed separately under Q4 and Q5. | New models + migration (later) | Approved (2026-11-23) |
+| D15 | Credential injection contract | **Approved (2026-11-23):** Credential injection will use `VAULT_SIGNING` as the preferred and default authentication mode. Connectors must access authentication capabilities only through `CredentialProvider`, which delegates credential handling, authentication header generation, and signing operations to CredentialVault without exposing plaintext credentials. `LEASE` is an explicitly limited fallback only when a Provider or SDK technically requires direct access to credential material. CredentialLease must be scoped, time-limited, memory-only, and redacted in `repr`/`str`. CredentialVault remains the sole component authorized to decrypt credentials and hold the master encryption key. ConnectContext must contain only non-sensitive configuration. Celery Workers must reconstruct Connectors and inject CredentialProvider through ConnectorManager; secrets and SDAM must never be included in Celery messages, plaintext database records, logs, exceptions, API/frontend output, or unauthorized destinations. Credential access must be scoped by `source_id` and permissions, and credential operations must be auditable without recording sensitive values. Best-effort memory cleanup is required where feasible, acknowledging that Python cannot guarantee complete memory erasure. | Resolves the `connect()`/security contradiction; per-connector `auth_mode`; memory-erasure limitation documented | Approved (2026-11-23) |
 
 ## 17) Open Questions
 
-- **Q1 (First real provider timing — reframed, see Section 18):** Given "≥1 source connected" is a **Phase 2 exit criterion** and cannot be deferred to Phase 3 without an approved plan change, **which Phase 2 task** delivers the first real provider (Hyperliquid) + staging integration, and when? Task 1 stays framework-only.
-- Q2: Approve top-level `connectors/` + `pyproject.toml` packaging approach (D1/D2)?
+- **Q1 (First real provider — timing and delivering task — reframed, see Section 18):** The selection of **Hyperliquid** as the first real provider is **approved per D11**. Given "≥1 source connected" is a **Phase 2 exit criterion** and cannot be deferred to Phase 3 without an approved plan change, the only remaining open items are **which Phase 2 task** delivers the first real provider + staging integration, and **when** it is scheduled. Task 1 stays framework-only. (Former Q9 — adding a Phase 2 task "First Real Connector (Hyperliquid) + staging integration" — is merged here; the task proposal is the mechanism to answer the timing/placement question, not a re-approval of D11.)
+- Q2: **Resolved by D1 and D2 (2026-11-23)** — top-level `connectors/` + `pyproject.toml` packaging approach.
 - Q3: Production master-key storage (Secret Manager vs Vault) — decide before production; dev uses env.
 - Q4: `raw_events` schema / raw-vs-processed split (Tasks 3/5) and TimescaleDB decision.
 - Q5: Append-only status-history table vs logs-only history.
 - Q6: Celery worker location and import path to the connectors package (D12).
-- **Q7 (conflict — recovery/DLQ ownership):** Official `PHASE_02_DATA_INFRA.md` assigns **recovery and DLQ** to **Task 5 (Event Processor)** and only "Message queue (Celery on Redis)" to **Task 7**. The requested split assigns **Celery task-level retry, recovery, and DLQ** to **Task 7**. This is a real overlap/conflict. Options to decide: (a) Task 7 owns Celery **transport-level** retry + DLQ, Task 5 owns **event-level** dedup/idempotency/recovery semantics; (b) consolidate recovery/DLQ under one task. Recorded as open; no silent choice made.
-- Q8: Approve proposed connector-retry config keys/defaults (D8a): `max_attempts`, `max_total_wait`, backoff base/cap, jitter.
-- **Q9 (proposed new task):** Approve adding a Phase 2 task "First Real Connector (Hyperliquid) + staging integration" (proposal only; official phase plan not edited).
+- **Q7 (recovery/DLQ ownership — clarified by D8, approved 2026-11-23):** Official `PHASE_02_DATA_INFRA.md` lists **recovery/DLQ** under **Task 5 (Event Processor)** and only "Message queue (Celery on Redis)" under **Task 7**. D8 resolves the overlap by splitting ownership: **Event-level DLQ + event recovery/idempotency → Event Processor (Task 5)**, and **Task-level DLQ + task retry → Celery Worker (Task 7)**. No longer blocking; residual note: the official plan's "DLQ" under Task 5 is interpreted as **event-level**.
+- Q8: **Resolved by D8a (2026-11-23)** — connector-retry config keys/defaults (`max_attempts`, `max_total_wait`, backoff base/cap, jitter) approved.
+
+_(Former Q9 merged into Q1 above; no longer an independent open question.)_
 
 ## 18) Task 1 Real-Provider Connection — Ambiguity Analysis (Correction E)
 
@@ -463,24 +472,24 @@ Authoritative references:
 - `PHASE_02_DATA_INFRA.md` frames Task 1 as the framework and places "≥1 source connected" at the **phase exit**, implying no real provider is required inside Task 1.
 - `MODULE_DATA_CONNECTOR.md` lists "≥1 source connected" under the module's **acceptance**, which could be read as required for the connector module (and thus potentially Task 1).
 
-**Proposed resolution (recommended, pending approval):**
+**Resolution (Hyperliquid approved per D11; timing remains Q1):**
 - Task 1 delivers the **framework + minimal MockConnector + contract/unit/security tests only** (no real provider), consistent with `PHASE_02_DATA_INFRA.md` Task 1 and `TESTING_STRATEGY.md` (no real API in unit tests).
-- Because "≥1 source connected" is a **Phase 2 exit criterion**, it is satisfied **within Phase 2** (NOT deferred to Phase 3) by adding the first real connector (**Hyperliquid**) in a **separate Phase 2 task** (proposed; see Q9), verified by a **staging integration test** (real source) rather than a unit test.
-- Until the user decides, **Q1 remains OPEN** (which Phase 2 task + timing). No real provider connection is designed or implemented here.
+- Because "≥1 source connected" is a **Phase 2 exit criterion**, it is satisfied **within Phase 2** (NOT deferred to Phase 3) by adding the first real connector (**Hyperliquid**, approved per D11) in a **separate Phase 2 task** (proposed; merged into Q1), verified by a **staging integration test** (real source) rather than a unit test.
+- **Q1 remains OPEN** only for which Phase 2 task + timing (Hyperliquid selection itself is approved per D11). No real provider connection is designed or implemented here.
 
 ### 18.1 Conflict — recovery/DLQ ownership (Task 5 vs Task 7)
 
 - `PHASE_02_DATA_INFRA.md` line 8: **Task 5 = "Event Processor (dedup, idempotency, recovery, DLQ)"**; line 10: **Task 7 = "Message queue (Celery on Redis)"**. → Official plan places recovery/DLQ under **Task 5**.
 - The requested revision assigns **Celery task-level retry, recovery, and DLQ** to **Task 7**.
-- **This is a genuine conflict** between the official plan and the requested split. It is recorded here and as **Q7**; no unilateral choice is made. Proposed reconciliation (pending approval): Task 7 = Celery **transport-level** retry + DLQ mechanics; Task 5 = **event-level** dedup/idempotency/recovery semantics. Final ownership to be decided by the user.
+- **This was a genuine conflict** between the official plan and the requested split. **Resolved by D8 (approved 2026-11-23):** Task 7 = Celery task-level retry + **Task-level DLQ**; Task 5 = **event-level** dedup/idempotency/recovery + **Event-level DLQ**. The official plan's "recovery/DLQ" under Task 5 is interpreted as **event-level**. See Q7.
 
 ## 19) Implementation Sequence for Task 1 (after approval)
 
-1. Approve Open Questions Q1–Q9 (esp. placement/packaging D1/D2, credential approach, Hyperliquid + Phase 2 timing Q1/Q9, and the Task 5/Task 7 recovery/DLQ conflict Q7).
+1. Resolve remaining open items: Q1 (Hyperliquid scheduling — which Phase 2 task + timing; selection approved per D11) and Q3–Q6 (production key storage, raw_events/TimescaleDB, status history, worker placement). Placement/packaging (D1/D2), credential approach (D5/D6/D15), retry (D8/D8a/D8b), and the Task 5/Task 7 recovery/DLQ conflict (D8, Q7) are resolved.
 2. Packaging/import setup (no provider logic).
 3. Contract: `base.py` (ABC) + capability Protocols + `types.py` + `errors.py` (incl. `stream()`).
 4. Models (`DataSource`, `DataSourceStatus`, `ConnectorLog`, `ApiCredential`) + Alembic migration (no plaintext).
-5. `CredentialVault` (Fernet) + `KeyProvider` interface + per-connector config (incl. retry config keys, pending approval).
+5. `CredentialVault` (Fernet) + `KeyProvider` interface + per-connector config (incl. retry config keys per D8a, timeout architecture per D8b).
 6. `ConnectorRegistry`/`ConnectorManager` skeleton (capability checks, credential injection).
 7. **Minimal** `MockConnector` (REST + streaming variants) — sufficient for interface validation + contract tests (Task 2 expands behaviors).
 8. Connector-level retry logic + error contract; contract test suite + unit + credential-security + retry tests. **No Celery** (Task 7).
