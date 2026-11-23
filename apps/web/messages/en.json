@@ -28,5 +28,47 @@
     "notAvailable": "N/A",
     "checkingData": "Checking...",
     "monitoringControls": "Monitoring Controls"
+  },
+  "Dashboard": {
+    "title": "Market Dashboard",
+    "loading": "Loading market data...",
+    "totalMarketCap": "Total Market Cap",
+    "totalVolume": "24h Volume",
+    "btcDominance": "BTC Dominance",
+    "search": "Search assets",
+    "asset": "Asset",
+    "price": "Price",
+    "change24h": "24h Change",
+    "marketCap": "Market Cap",
+    "volume": "Volume",
+    "watchlist": "Watchlist",
+    "empty": "No assets found"
+  },
+  "AssetDetail": {
+    "loading": "Loading asset...",
+    "notFound": "Asset not found",
+    "price": "Price",
+    "marketCap": "Market Cap",
+    "volume": "Volume",
+    "history": "Price History",
+    "mock": "simulated",
+    "back": "Back to market"
+  },
+  "Watchlist": {
+    "title": "Watchlist",
+    "empty": "No assets in watchlist",
+    "add": "Add to watchlist",
+    "remove": "Remove"
+  },
+  "Freshness": {
+    "loading": "Loading...",
+    "stale": "stale",
+    "unknown": "unknown"
+  },
+  "Settings": {
+    "title": "Settings",
+    "language": "Language",
+    "dataSource": "Data Source",
+    "mockSource": "Mock / simulated data"
   }
 }

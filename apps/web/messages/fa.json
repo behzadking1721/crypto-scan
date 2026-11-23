@@ -28,5 +28,47 @@
     "notAvailable": "در دسترس نیست",
     "checkingData": "در حال بررسی...",
     "monitoringControls": "کنترل‌های پایش"
+  },
+  "Dashboard": {
+    "title": "داشبورد بازار",
+    "loading": "در حال بارگذاری...",
+    "totalMarketCap": "ارزش کل بازار",
+    "totalVolume": "حجم ۲۴ ساعته",
+    "btcDominance": "سهم بیت‌کوین",
+    "search": "جستجوی ارز",
+    "asset": "ارز",
+    "price": "قیمت",
+    "change24h": "تغییر ۲۴ ساعته",
+    "marketCap": "ارزش بازار",
+    "volume": "حجم",
+    "watchlist": "علاقه‌مندی",
+    "empty": "ارزی یافت نشد"
+  },
+  "AssetDetail": {
+    "loading": "در حال بارگذاری...",
+    "notFound": "ارز یافت نشد",
+    "price": "قیمت",
+    "marketCap": "ارزش بازار",
+    "volume": "حجم",
+    "history": "تاریخچه قیمت",
+    "mock": "شبیه‌سازی",
+    "back": "بازگشت به بازار"
+  },
+  "Watchlist": {
+    "title": "لیست علاقه‌مندی",
+    "empty": "موردی در لیست علاقه‌مندی نیست",
+    "add": "افزودن به علاقه‌مندی",
+    "remove": "حذف"
+  },
+  "Freshness": {
+    "loading": "در حال بارگذاری...",
+    "stale": "قدیمی",
+    "unknown": "ناشناخته"
+  },
+  "Settings": {
+    "title": "تنظیمات",
+    "language": "زبان",
+    "dataSource": "منبع داده",
+    "mockSource": "داده شبیه‌سازی‌شده"
   }
 }
