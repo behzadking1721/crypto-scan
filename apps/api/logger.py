@@ -42,6 +42,23 @@ def _generate_request_id() -> str:
     return str(uuid.uuid4())
 
 
+from connectors.redaction import redact_mapping, redact_string, redact_value
+
+ALLOWED_EXTRA_FIELDS = {
+    "request_id",
+    "method",
+    "path",
+    "process_time_ms",
+    "status_code",
+    "exception_type",
+    "event",
+    "level",
+    "data_source_id",
+    "error_code",
+    "http_status",
+    "latency_ms",
+}
+
 class JsonFormatter(_stdlib_logging.Formatter):
     def format(self, record: _stdlib_logging.LogRecord) -> str:
         log_entry: dict[str, Any] = {
@@ -50,16 +67,18 @@ class JsonFormatter(_stdlib_logging.Formatter):
             ).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_string(record.getMessage()),
         }
         if record.exc_info:
-            log_entry["exception"] = self.formatException(record.exc_info)
+            log_entry["exception"] = redact_string(self.formatException(record.exc_info))
         for key, value in record.__dict__.items():
             if key in _RESERVED_LOGRECORD_ATTRS:
                 continue
+            if key not in ALLOWED_EXTRA_FIELDS:
+                continue
             if key not in log_entry:
-                log_entry[key] = value
-        return json.dumps(log_entry, ensure_ascii=False)
+                log_entry[key] = redact_value(value)
+        return json.dumps(redact_mapping(log_entry), ensure_ascii=False)
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
