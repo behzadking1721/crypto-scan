@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-scan-connectors"
+version = "0.1.0"
+description = "Connector Framework — standard contract, registry, credentials, and minimal mock connectors (Phase 2 Task 1)."
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "Proprietary" }
+authors = [{ name = "Crypto Scan" }]
+
+# No runtime dependencies at this stage (D13: httpx/websockets/cryptography/respx
+# are deferred to later tasks). Test-only dependencies are declared under
+# [project.optional-dependencies] so the Production package stays minimal.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+
+# ---- Package Discovery ----
+# Production package: connectors + connectors.mock
+# connectors.tests is intentionally NOT included in the production distribution.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["connectors*", "normalizers*", "data_quality*"]
+exclude = ["*.tests*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["connectors/tests"]
