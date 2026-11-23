@@ -24,3 +24,5 @@ class AuditLog(Base):
         DateTime(timezone=True), nullable=False, default=datetime.utcnow, index=True
     )
     detail: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+import event_processor_models  # noqa: F401
